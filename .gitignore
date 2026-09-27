@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-server/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.venv/
+data/run-history.json
+__pycache__/
+*.py[cod]
