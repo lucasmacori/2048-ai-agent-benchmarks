@@ -11,6 +11,11 @@ function boolean(name: string, fallback: boolean): boolean {
   return value === undefined ? fallback : value.toLowerCase() === "true";
 }
 
+function probability(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : fallback;
+}
+
 const configuredKey = process.env.OPENROUTER_API_KEY;
 const apiKey = configuredKey && !configuredKey.startsWith("replace_") && configuredKey !== "your_openrouter_api_key"
   ? configuredKey
@@ -29,6 +34,8 @@ export const config = {
   agentDelaySlowMs: integer("AGENT_DELAY_SLOW_MS", DEFAULT_AGENT_CONFIG.delayOptionsMs[2], 0),
   llmReasonMaxLength: integer("LLM_REASON_MAX_LENGTH", 160),
   llmRequireParameters: boolean("LLM_REQUIRE_PARAMETERS", true),
+  system2ProbabilityMargin: probability("SYSTEM2_PROBABILITY_MARGIN", 0.15),
+  system2ConfidenceThreshold: probability("SYSTEM2_CONFIDENCE_THRESHOLD", 0.6),
   capabilitiesTimeoutMs: integer("CAPABILITIES_TIMEOUT_MS", 1200),
   jevInstructions: process.env.JEV_INSTRUCTIONS || "Choose the legal move most likely to survive and eventually create 2048. Prefer preserving empty cells and keeping the largest tile in a corner; use immediate score secondarily.",
   llmInstructions: process.env.LLM_INSTRUCTIONS || "Play 2048. Pick the strongest move using the board and simulated move outcomes. Return a concise reason. Only choose one of the legal moves.",

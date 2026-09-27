@@ -1,7 +1,24 @@
 export type Direction = "up" | "down" | "left" | "right";
 export type Board = number[][];
 export type GameStatus = "playing" | "won" | "lost";
-export type GameMode = "manual" | "jev" | "llm" | "laya";
+export type GameMode = "manual" | "jev" | "llm" | "laya" | "hybrid";
+export type HybridSystem1 = "jev" | "laya";
+export type HybridSystem2 = "human" | "llm";
+export interface DelegationTrace {
+  delegated: boolean;
+  reason: "single-option" | "probability-margin" | "low-confidence" | "uncertainty-unavailable" | "decisive";
+  probabilityMargin?: number;
+  system1Move: Direction;
+  system1Confidence?: number;
+  system1Probabilities?: Record<string, number>;
+  system2Type: HybridSystem2;
+  system2Model?: string;
+  finalOwner?: "system1" | "system2" | "human";
+  system1Usage?: AgentDecision["usage"];
+  system2Usage?: AgentDecision["usage"];
+  system1LatencyMs?: number;
+  system2LatencyMs?: number;
+}
 
 export interface DecisionDiagnostic {
   attempt: number;
@@ -94,4 +111,6 @@ export interface TurnRecord {
   model?: string;
   explanation?: string;
   diagnostics?: DecisionDiagnostic[];
+  mechanics?: GameMechanicsTrace;
+  delegation?: DelegationTrace;
 }

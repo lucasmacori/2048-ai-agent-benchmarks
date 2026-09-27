@@ -1,4 +1,4 @@
-import type { GameMode, TurnRecord } from "../game/types.js";
+import type { GameMode, HybridSystem1, HybridSystem2, TurnRecord } from "../game/types.js";
 import type { DecisionDiagnostic } from "../game/types.js";
 import type { ReasoningSetting } from "../agent/reasoning.js";
 
@@ -16,6 +16,7 @@ export interface RunIdentity {
   contextVersion?: "turn-facts-v2";
   sessionName?: string;
   reasoning?: ReasoningSetting;
+  hybrid?: { system1: HybridSystem1; system2: HybridSystem2; system2Model?: string; probabilityMargin: number; confidenceThreshold: number };
 }
 
 export interface RunMetrics {

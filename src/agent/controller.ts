@@ -1,5 +1,5 @@
 import { applyMoveWithTrace, createGame, createRandom, legalMoves } from "../game/engine.js";
-import type { AgentDecision, Direction, GameMode, GameState, TurnRecord } from "../game/types.js";
+import type { AgentDecision, DelegationTrace, Direction, GameMode, GameState, HybridSystem1, HybridSystem2, TurnRecord } from "../game/types.js";
 import { DecisionRequestError, requestDecision } from "./api-client.js";
 import { completionBudget, DEFAULT_REASONING, type ReasoningSetting } from "./reasoning.js";
 import type { DecisionDiagnostic } from "../game/types.js";
@@ -7,7 +7,7 @@ import { RunTracker } from "../history/run-tracker.js";
 import type { RunFinishReason } from "../history/types.js";
 import { DEFAULT_AGENT_CONFIG, type AgentRuntimeConfig } from "./runtime-config.js";
 
-export type ControllerStatus = "idle" | "running" | "waiting" | "paused" | "finished" | "error";
+export type ControllerStatus = "idle" | "running" | "waiting" | "awaiting-human" | "paused" | "finished" | "error";
 
 export class AgentController {
   state: GameState;
@@ -21,6 +21,13 @@ export class AgentController {
   mode: GameMode = "jev";
   model = "openai/gpt-5.6-luna";
   reasoning: ReasoningSetting = { ...DEFAULT_REASONING };
+  system1: HybridSystem1 = "jev";
+  system2: HybridSystem2 = "human";
+  system2Model = "openai/gpt-5.6-luna";
+  system2ProbabilityMargin = 0.15;
+  system2ConfidenceThreshold = 0.6;
+  system1Decision?: AgentDecision;
+  private resumeAfterHuman = false;
   modelLabels: Record<string, string> = {};
   modelMetadata: Record<string, { provider: string; tier: "cheap" | "mid" | "frontier"; reasoning: import("./reasoning.js").ReasoningCapabilities }> = {};
   engineModels: Partial<Record<Exclude<GameMode, "llm" | "manual">, { id: string; name: string }>> = {};
@@ -53,6 +60,7 @@ export class AgentController {
   private currentModel(): string {
     if (this.mode === "manual") return "Human";
     if (this.mode === "llm") return this.model;
+    if (this.mode === "hybrid") return `hybrid:${this.system1}+${this.system2 === "human" ? "human" : this.system2Model}`;
     if (this.mode === "jev") return this.engineModels.jev?.id || "~typesafe/jev-latest";
     return this.engineModels.laya?.id || "laya-english";
   }
@@ -64,10 +72,10 @@ export class AgentController {
   private runIdentity(seed: number) {
     const model = this.currentModel();
     const metadata = this.modelMetadata[model];
-    return { id: crypto.randomUUID(), mode: this.mode, model, modelName: this.modelName(), seed, startedAt: new Date().toISOString(), ...(metadata ? { provider: metadata.provider, tier: metadata.tier } : {}), ...(this.mode === "llm" ? { reasoning: { ...this.reasoning, maxCompletionTokens: completionBudget(this.reasoning) } } : {}), contextVersion: "turn-facts-v2" as const };
+    return { id: crypto.randomUUID(), mode: this.mode, model, modelName: this.modelName(), seed, startedAt: new Date().toISOString(), ...(metadata ? { provider: metadata.provider, tier: metadata.tier } : {}), ...(this.mode === "llm" ? { reasoning: { ...this.reasoning, maxCompletionTokens: completionBudget(this.reasoning) } } : {}), ...(this.mode === "hybrid" ? { hybrid: { system1: this.system1, system2: this.system2, ...(this.system2 === "llm" ? { system2Model: this.system2Model } : {}), probabilityMargin: this.system2ProbabilityMargin, confidenceThreshold: this.system2ConfidenceThreshold } } : {}), contextVersion: "turn-facts-v2" as const };
   }
 
-  private modelName(): string { return this.mode === "manual" ? "Human" : this.modelLabels[this.currentModel()] || (this.mode === "jev" ? "JEV" : this.mode === "laya" ? "Laya English" : this.currentModel()); }
+  private modelName(): string { return this.mode === "manual" ? "Human" : this.mode === "hybrid" ? `System 1 / System 2 (${this.system1} / ${this.system2 === "human" ? "Human" : this.modelLabels[this.system2Model] || this.system2Model})` : this.modelLabels[this.currentModel()] || (this.mode === "jev" ? "JEV" : this.mode === "laya" ? "Laya English" : this.currentModel()); }
 
   private async finishRun(reason: RunFinishReason, terminalError?: string, diagnostics?: DecisionDiagnostic[]): Promise<void> { await this.runTracker.finish(reason, terminalError, diagnostics); }
 
@@ -130,22 +138,47 @@ export class AgentController {
     this.delay = config.defaultDelayMs;
   }
 
+  configureHybridThresholds(thresholds: { probabilityMargin: number; confidenceThreshold: number }): void {
+    this.system2ProbabilityMargin = thresholds.probabilityMargin;
+    this.system2ConfidenceThreshold = thresholds.confidenceThreshold;
+  }
+
   move(direction: Direction): void {
-    if (this.mode !== "manual" || this.status === "running" || this.status === "waiting" || this.state.status !== "playing") return;
+    const delegatedHuman = this.mode === "hybrid" && this.status === "awaiting-human";
+    if ((!delegatedHuman && this.mode !== "manual") || this.status === "running" || (this.status === "waiting" && !delegatedHuman) || this.state.status !== "playing") return;
     const { state: next, mechanics } = applyMoveWithTrace(this.state, direction, this.random, this.recentMovesLimit);
     if (next === this.state) return;
     const before = this.state;
     if (!this.runTracker.currentRunId()) this.beginRun(before.seed);
     this.state = next;
     if (!this.runTracker.currentSummary()) this.beginRun(before.seed);
-    this.lastDecision = { move: direction, model: "Human", latencyMs: 0 };
-    const record: TurnRecord = { turn: next.turn, move: direction, scoreGain: next.score - before.score, score: next.score, board: next.board.map((row) => [...row]), latencyMs: 0, mode: "manual", model: "Human", mechanics };
+    this.lastDecision = { move: direction, model: delegatedHuman ? "Human (System 2)" : "Human", latencyMs: 0 };
+    const record: TurnRecord = { turn: next.turn, move: direction, scoreGain: next.score - before.score, score: next.score, board: next.board.map((row) => [...row]), latencyMs: delegatedHuman ? this.pendingDelegation?.system1LatencyMs || 0 : 0, mode: delegatedHuman ? "hybrid" : "manual", model: delegatedHuman ? "Human (System 2)" : "Human", ...(delegatedHuman ? { usage: this.pendingDelegation?.system1Usage } : {}), mechanics, ...(delegatedHuman && this.pendingDelegation ? { delegation: { ...this.pendingDelegation, finalOwner: "human" } } : {}) };
     this.history.push(record);
     this.runTracker.append(record);
-    this.status = next.status === "playing" ? "paused" : "finished";
+    this.system1Decision = undefined;
+    this.pendingDelegation = undefined;
+    this.status = next.status !== "playing" ? "finished" : delegatedHuman && this.resumeAfterHuman ? "running" : "paused";
+    if (delegatedHuman && this.resumeAfterHuman && next.status === "playing") { this.resumeAfterHuman = false; void this.loop(); }
     if (next.status !== "playing") void this.finishRun(next.status);
     this.error = undefined;
     this.notify();
+  }
+
+  pendingDelegation?: DelegationTrace;
+
+  configureHybrid(system1: HybridSystem1, system2: HybridSystem2, system2Model = this.system2Model): void {
+    if (this.system1 === system1 && this.system2 === system2 && this.system2Model === system2Model) return;
+    const seed = this.state.seed;
+    this.generation += 1;
+    this.requestController?.abort();
+    void this.finishRun("engine-change");
+    this.system1 = system1; this.system2 = system2; this.system2Model = system2Model;
+    const capabilities = this.modelMetadata[system2Model]?.reasoning;
+    if (capabilities?.mandatory && this.reasoning.mode === "disabled") this.reasoning = capabilities.supportedEfforts?.length ? { mode: "effort", effort: capabilities.supportedEfforts[0] } : { mode: "default" };
+    else if (!capabilities?.supported) this.reasoning = { mode: "disabled" };
+    else if (this.reasoning.mode === "effort" && !capabilities.supportedEfforts?.includes(this.reasoning.effort!)) this.reasoning = capabilities.mandatory ? { mode: "effort", effort: capabilities.supportedEfforts?.[0] || "low" } : { mode: "disabled" };
+    this.reset(seed, false);
   }
 
   start(): void {
@@ -188,6 +221,9 @@ export class AgentController {
     this.providerSessionId = crypto.randomUUID();
     this.history = [];
     this.lastDecision = undefined;
+    this.system1Decision = undefined;
+    this.pendingDelegation = undefined;
+    this.resumeAfterHuman = false;
     this.error = undefined;
     this.status = "idle";
     this.runTracker.begin(this.runIdentity(this.state.seed));
@@ -221,8 +257,16 @@ export class AgentController {
     this.requestController = requestController;
     try {
       const mode = this.mode === "manual" ? "jev" : this.mode;
-      const decision = await requestDecision(before, this.providerSessionId, mode, this.model, requestController.signal, this.reasoning);
+      const result = await requestDecision(before, this.providerSessionId, mode, this.model, requestController.signal, this.reasoning, this.mode === "hybrid" ? { system1: this.system1, system2: this.system2, system2Model: this.system2Model, system2Reasoning: this.modelMetadata[this.system2Model]?.reasoning.mandatory ? (this.reasoning.mode === "disabled" ? { mode: "default" } : this.reasoning) : this.reasoning } : undefined);
       if (generation !== this.generation) return;
+      if (result.outcome === "human-required") {
+        this.system1Decision = result.system1Decision;
+        this.pendingDelegation = result.delegation;
+        this.resumeAfterHuman = this.status === "running";
+        this.status = "awaiting-human";
+        return;
+      }
+      const decision = result.decision || result as AgentDecision;
       if (!legalMoves(this.state.board).includes(decision.move as Direction)) throw new Error("JEV selected an illegal move");
       const { state: next, mechanics } = applyMoveWithTrace(this.state, decision.move, this.random, this.recentMovesLimit);
       this.state = next;
@@ -237,11 +281,12 @@ export class AgentController {
         score: next.score,
         board: next.board.map((row) => [...row]),
         usage: decision.usage,
-        mode: decision.mode,
+        mode: this.mode,
         model: decision.model,
         explanation: decision.explanation,
         diagnostics: decision.diagnostics,
         mechanics,
+        ...(result.delegation ? { delegation: result.delegation } : {}),
       });
       const turnRecord = this.history[this.history.length - 1];
       this.runTracker.append(turnRecord);

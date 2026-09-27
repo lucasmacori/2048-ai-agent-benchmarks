@@ -3,6 +3,8 @@ import { legalMoves } from "../src/game/engine.js";
 import { createTurnFacts } from "../src/game/turn-facts.js";
 import type { Direction, GameMode } from "../src/game/types.js";
 import type { DecisionDiagnostic } from "../src/game/types.js";
+import type { DelegationTrace, HybridSystem1, HybridSystem2 } from "../src/game/types.js";
+import { assessDelegation } from "./delegation-policy.js";
 import { getReasoningCapabilities, isAllowedLlmModel } from "./model-catalog.js";
 import { config } from "./config.js";
 import type { ReasoningSetting } from "../src/agent/reasoning.js";
@@ -21,7 +23,41 @@ export interface DecisionResponse {
   diagnostics?: DecisionDiagnostic[];
 }
 
-type Input = { gameId: string; board: number[][]; score: number; turn: number; recentMoves: Direction[]; mode: "jev" | "llm" | "laya"; model?: string; reasoning?: ReasoningSetting };
+type Input = { gameId: string; board: number[][]; score: number; turn: number; recentMoves: Direction[]; mode: "jev" | "llm" | "laya"; model?: string; reasoning?: ReasoningSetting; delegationContext?: string };
+
+export type HybridDecisionResponse =
+  | { outcome: "move"; decision: DecisionResponse; delegation: DelegationTrace }
+  | { outcome: "human-required"; system1Decision: DecisionResponse; delegation: DelegationTrace };
+
+export async function decideHybrid(client: OpenRouter | undefined, jevModel: string, input: Omit<Input, "mode"> & {
+  system1: HybridSystem1; system2: HybridSystem2; system2Model?: string; system2Reasoning?: ReasoningSetting;
+}): Promise<HybridDecisionResponse> {
+  const system1Decision = await decideMove(client, jevModel, { ...input, mode: input.system1 });
+  const legal = legalMoves(input.board);
+  const delegation = assessDelegation(system1Decision, legal, input.system2, {
+    probabilityMargin: config.system2ProbabilityMargin,
+    confidenceThreshold: config.system2ConfidenceThreshold,
+  }, input.system2Model);
+  const system1Usage = system1Decision.usage;
+  if (!delegation.delegated) return { outcome: "move", decision: system1Decision, delegation: { ...delegation, system1Usage, system1LatencyMs: system1Decision.latencyMs } };
+  if (input.system2 === "human") return { outcome: "human-required", system1Decision, delegation: { ...delegation, system1Usage, system1LatencyMs: system1Decision.latencyMs } };
+  const decision = await decideMove(client, jevModel, {
+    ...input,
+    mode: "llm",
+    model: input.system2Model,
+    reasoning: input.system2Reasoning,
+    delegationContext: JSON.stringify({ system1Move: system1Decision.move, confidence: system1Decision.confidence, probabilities: system1Decision.probabilities, reason: delegation.reason, probabilityMargin: delegation.probabilityMargin }),
+  });
+  return { outcome: "move", decision: {
+    ...decision,
+    latencyMs: system1Decision.latencyMs + decision.latencyMs,
+    usage: {
+      inputTokens: system1Usage?.inputTokens === undefined && decision.usage?.inputTokens === undefined ? undefined : (system1Usage?.inputTokens || 0) + (decision.usage?.inputTokens || 0),
+      outputTokens: system1Usage?.outputTokens === undefined && decision.usage?.outputTokens === undefined ? undefined : (system1Usage?.outputTokens || 0) + (decision.usage?.outputTokens || 0),
+      cost: system1Usage?.cost === undefined && decision.usage?.cost === undefined ? undefined : (system1Usage?.cost || 0) + (decision.usage?.cost || 0),
+    },
+  }, delegation: { ...delegation, finalOwner: "system2", system1Usage, system2Usage: decision.usage, system1LatencyMs: system1Decision.latencyMs, system2LatencyMs: decision.latencyMs } };
+}
 
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "LLM request failed";
@@ -121,7 +157,7 @@ export async function decideMove(client: OpenRouter | undefined, jevModel: strin
             session_id: input.gameId,
             messages: [
               { role: "system", content: "Return only JSON matching the required schema. Choose exactly one legal move that gives the best chance of reaching 2048 before no legal moves remain. Use only the supplied turn facts." },
-              { role: "user", content: JSON.stringify(facts) },
+              { role: "user", content: `${JSON.stringify(facts)}${input.delegationContext ? `\n\nSystem 1's uncertain recommendation (review independently): ${input.delegationContext}` : ""}` },
             ],
             response_format: { type: "json_schema", json_schema: { name: "move_decision", strict: true, schema: {
               type: "object", properties: { move: { type: "string", enum: legal, description: "One legal move direction." }, reason: { type: "string", maxLength: 160, description: "A brief explanation, at most 160 characters." } }, required: ["move", "reason"], additionalProperties: false,

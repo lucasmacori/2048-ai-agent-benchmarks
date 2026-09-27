@@ -93,7 +93,7 @@ export class RunHistoryRepository {
     const metrics = run.metrics;
     return typeof run.id === "string" && typeof run.model === "string" && typeof run.modelName === "string"
       && typeof run.seed === "number" && typeof run.startedAt === "string" && typeof run.finishedAt === "string"
-      && ["manual", "jev", "llm", "laya"].includes(String(run.mode)) && Array.isArray(run.turns)
+      && ["manual", "jev", "llm", "laya", "hybrid"].includes(String(run.mode)) && Array.isArray(run.turns)
       && Boolean(metrics && typeof metrics === "object" && typeof (metrics as Record<string, unknown>).score === "number")
       && (run.pending === undefined || typeof run.pending === "boolean");
   }

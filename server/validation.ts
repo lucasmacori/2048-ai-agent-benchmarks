@@ -8,7 +8,11 @@ const directions = ["up", "down", "left", "right"] as const;
 const boardSchema = z.custom<number[][]>(isValidBoard, "Expected a 4 by 4 board of zeroes and powers of two");
 
 export const decisionRequestSchema = z.object({
-  mode: z.enum(["jev", "llm", "laya"]).default("jev"),
+  mode: z.enum(["jev", "llm", "laya", "hybrid"]).default("jev"),
+  system1: z.enum(["jev", "laya"]).optional(),
+  system2: z.enum(["human", "llm"]).optional(),
+  system2Model: z.string().max(100).optional(),
+  system2Reasoning: z.object({ mode: z.enum(["disabled", "default", "effort"]), effort: z.enum(REASONING_EFFORTS).optional() }).optional(),
   model: z.string().max(100).optional(),
   reasoning: z.object({ mode: z.enum(["disabled", "default", "effort"]), effort: z.enum(REASONING_EFFORTS).optional() }).optional(),
   gameId: z.string().min(1).max(100),

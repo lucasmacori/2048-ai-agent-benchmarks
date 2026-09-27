@@ -81,3 +81,24 @@ describe("AgentController manual mode", () => {
     expect(controller.reasoning).toMatchObject({ mode: "effort", effort: "high" });
   });
 });
+
+describe("AgentController hybrid human handoff", () => {
+  it("waits without changing the board, then applies one human move", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      outcome: "human-required",
+      system1Decision: { move: "left", confidence: 0.4, latencyMs: 12, model: "JEV" },
+      delegation: { delegated: true, reason: "low-confidence", system1Move: "left", system1Confidence: 0.4, system2Type: "human" },
+    }), { status: 200 })));
+    const controller = new AgentController(456);
+    controller.setMode("hybrid");
+    const boardBefore = structuredClone(controller.state.board);
+    await controller.step();
+    expect(controller.status).toBe("awaiting-human");
+    expect(controller.state.board).toEqual(boardBefore);
+    controller.move(engine.legalMoves(controller.state.board)[0]!);
+    expect(controller.state.turn).toBe(1);
+    expect(controller.history[0]?.mode).toBe("hybrid");
+    expect(controller.history[0]?.delegation?.finalOwner).toBe("human");
+    expect(controller.status).toBe("paused");
+  });
+});
