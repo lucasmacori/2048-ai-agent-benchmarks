@@ -28,6 +28,7 @@ Run summaries and decision tapes are stored by the server in `data/run-history.j
 
 - `npm run dev` — API, Vite, and optional installed Laya sidecar.
 - `npm run setup:laya` — create `.venv` and install pinned `laya[serve]` (Python 3.10+ required).
+- If you move or rename this project after setup, recreate the virtual environment with `rm -rf .venv` and `npm run setup:laya`; Python entry points contain absolute paths.
 - `npm run laya` — require and start the local Laya sidecar.
 - `npm test` — run unit tests; focus with `npx vitest run src/agent/controller.test.ts`.
 - `npm run typecheck` — check browser and server TypeScript projects.
